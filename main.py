@@ -1,13 +1,15 @@
 import time
-from ast import Index
-from copy import deepcopy
 from datetime import datetime, timedelta
 
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import declarative_base, sessionmaker
 from apscheduler.schedulers.background import BackgroundScheduler
 
 def flag_translation(c):
+    if c == '*' or c == 'a':
+        return '*'
     f = ''
     raw_flags = c
     for flag in raw_flags:
@@ -15,7 +17,7 @@ def flag_translation(c):
             f += str(int(flag) - 1)
         else:
             f += flag
-    if f != '*' and '-' not in f:
+    if '-' not in f:
         f = ",".join(f)
     return f
 
@@ -39,40 +41,38 @@ Base = declarative_base()
 class Alarm(Base):
     __tablename__ = 'alarms'
     id = Column(Integer, primary_key = True, autoincrement = True)
-    hour = Column(Integer, nullable = False)
-    minute = Column(Integer, default=0)
-    flags = Column(String, nullable = True)
+    command = Column(String, nullable=False)
     def __repr__(self):
-        return f"ALARM id: {self.id} time_marker: {self.hour}:{self.minute} flags: {self.flags}"
+        return f"ALARM id: {self.id} command: {self.command}"
 
 
 engine = create_engine('sqlite:///database.sqlite', echo=False)
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-def handle_alarm():
-    print("alarm triggered")
+def handle_alarm(id, is_once):
+    if is_once:
+        with Session() as session:
+            session.delete(session.query(Alarm).filter(Alarm.id == int(id)).first())
+            session.commit()
     time.sleep(3)
 
-def set_scheduler(command):
+def set_scheduler(command, id):
     if command['flags']:
-        scheduler.add_job(handle_alarm, trigger='cron', hour=command['hour'], minute=command['minute'],
-                          day_of_week=command['flags'], id=str(new_alarm.id))
+        scheduler.add_job(handle_alarm, args=[id, False], trigger='cron', hour=command['hour'], minute=command['minute'], day_of_week=command['flags'], id=str(id))
     else:
         now = datetime.now()
         alarm_data = now.replace(hour=command['hour'], minute=command['minute'], second=0, microsecond=0)
         if alarm_data <= now:
             alarm_data += timedelta(days=1)
-        scheduler.add_job(handle_alarm, trigger='date', run_date=alarm_data, id=str(new_alarm.id))
+        scheduler.add_job(handle_alarm, args=[id, True], trigger='date', run_date=alarm_data, id=str(id))
 
 
 scheduler.start()
 with Session() as session:
     saved_alarms = session.query(Alarm).all()
     for alarm in saved_alarms:
-        h, m = alarm.hour, alarm.minute
-        flags = flag_translation(alarm.flags)
-        scheduler.add_job(handle_alarm, trigger='cron', hour=int(h), minute=int(m), day_of_week = flags if flags else None, id = str(alarm.id))
+        set_scheduler(raw_command_translation(alarm.command), alarm.id)
 scheduler.print_jobs()
 
 def display():
@@ -80,13 +80,17 @@ def display():
     for job in scheduler.get_jobs():
         print(f'ID: {job.id}', end='\t')
         print(job.next_run_time.strftime('%H:%M'), end='\t')
-        days = str(job.trigger.fields[4])
-        for d in days:
-            if d.isdigit():
-                print(int(d) + 1, end='')
-            else:
-                print(d, end='')
-        print()
+        if isinstance(job.trigger, CronTrigger):
+            days = str(job.trigger.fields[4])
+            for d in days:
+                if d.isdigit():
+                    print(int(d) + 1, end='')
+                else:
+                    print(d, end='')
+            print()
+        if isinstance(job.trigger, DateTrigger):
+            print(job.trigger.run_date.strftime('%d.%m.%Y'))
+
 
 
 while True:
@@ -97,17 +101,17 @@ while True:
         input()
     if option == 's':
         while True:
-            # try:
-                command = raw_command_translation(input())
+            try:
+                raw_command = input()
+                command = raw_command_translation(raw_command)
                 if not command: break
                 with Session() as session:
-                    new_alarm = Alarm(hour=command['hour'], minute = command['minute'], flags = command['raw_flags'])
+                    new_alarm = Alarm(command=raw_command)
                     session.add(new_alarm)
                     session.commit()
-                    set_scheduler(command)
-
-            # except Exception:
-            #     print('command you entered is incorrect')
+                    set_scheduler(command, new_alarm.id)
+            except Exception:
+                print('command you entered is incorrect')
     if option == 'r':
         display()
         while True:
@@ -123,5 +127,3 @@ while True:
                 print('alarm removed successfully')
             except Exception:
                 print('id you entered is incorrect')
-
-#jest problem przy godzinach typu 1230 bez flag
